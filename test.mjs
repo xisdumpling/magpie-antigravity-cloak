@@ -70,12 +70,34 @@ const untouched = (after, w) =>
   cloaked(t, out.systemInstruction.parts[0].text, W.rfc)
 }
 
-// 3b. 关键回归：billing 头标记（真实 429 的元凶）被混淆
+// 3b. 关键回归：billing 头标记（真实 429 的元凶）默认直接剥离（保 Prefix Cache），关闭剥离时回退零宽混淆
 {
-  const t = W.billing + ": cc_version=1.2.3; cc_entrypoint=claude-desktop-3p;"
-  const body = { system: [{ type: "text", text: t }], messages: [] }
-  const out = onRequest(body, { protocol: "anthropic", options: {} })
-  cloaked(t, out.system[0].text, W.billing)
+  const billingLine = W.billing + ": cc_version=1.2.3; cc_entrypoint=claude-desktop-3p; cch=9ebf3;"
+  const sysText = `You are ${W.cc}.`
+
+  // 默认（stripBillingHeader: true）：独立计费头 block 被直接剔除，不留空 block，后续块正常混淆
+  const bodyBlocks = {
+    system: [
+      { type: "text", text: billingLine },
+      { type: "text", text: sysText },
+    ],
+    messages: [],
+  }
+  const outBlocks = onRequest(bodyBlocks, { protocol: "anthropic", options: {} })
+  assert(outBlocks.system.length === 1, "stripBillingHeader 默认：独立计费头 block 被移除")
+  assert(!outBlocks.system[0].text.includes("cc_version"), "stripBillingHeader 默认：不残留计费头内容")
+  cloaked(sysText, outBlocks.system[0].text, W.cc)
+
+  // 默认（stripBillingHeader: true）：单字符串首行计费头被剥离，同行后续段落保留并混淆
+  const combined = `${billingLine}\n${sysText}`
+  const outStr = onRequest({ system: combined, messages: [] }, { protocol: "anthropic", options: {} })
+  assert(!outStr.system.includes("cc_version"), "stripBillingHeader 默认：字符串首行计费头被剥离")
+  cloaked(sysText, outStr.system, W.cc)
+
+  // 显式关闭（stripBillingHeader: false）：保留计费头并用零宽空格混淆
+  const bodyFallback = { system: [{ type: "text", text: billingLine }], messages: [] }
+  const outFallback = onRequest(bodyFallback, { protocol: "anthropic", options: { stripBillingHeader: false } })
+  cloaked(billingLine, outFallback.system[0].text, W.billing)
 }
 
 // 4. chat：messages 里的 system
@@ -308,6 +330,93 @@ const untouched = (after, w) =>
     { options: { modelFilter: "antigravity/*" } }
   )
   untouched(missGlob.system, W.cc)
+}
+
+// 21. chat 协议：role === "developer" 的系统消息在默认模式下也被混淆并剥离首行计费头
+{
+  const billingLine = W.billing + ": cc_version=2.1.295; cch=abc12;"
+  const devMsg = `${billingLine}\nYou are ${W.cc}, using ${W.sdk}.`
+  const userMsg = `Hello ${W.cc}`
+  const body = {
+    messages: [
+      { role: "developer", content: devMsg },
+      { role: "user", content: userMsg },
+    ],
+  }
+  const out = onRequest(body, { protocol: "chat", options: {} })
+  assert(!out.messages[0].content.includes("cc_version"), "chat developer：首行计费头被剥离")
+  cloaked(devMsg, out.messages[0].content, W.cc)
+  cloaked(devMsg, out.messages[0].content, W.sdk)
+  untouched(out.messages[1].content, W.cc)
+}
+
+// 22. responses 协议：input 数组里 system / developer 角色消息（含 input_text 块）默认被混淆，user 不动
+{
+  const sysContent = `Follow ${W.conv} and ${W.rfc}.`
+  const devContent = `Built on ${W.sdk}.`
+  const userContent = `Ask about ${W.cc} and ${W.rfc}.`
+  const body = {
+    instructions: `Primary: ${W.cc}`,
+    input: [
+      {
+        type: "message",
+        role: "system",
+        content: sysContent,
+      },
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: devContent }],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: userContent }],
+      },
+    ],
+  }
+  const out = onRequest(body, { protocol: "responses", options: {} })
+  cloaked(`Primary: ${W.cc}`, out.instructions, W.cc)
+  cloaked(sysContent, out.input[0].content, W.conv)
+  cloaked(sysContent, out.input[0].content, W.rfc)
+  cloaked(devContent, out.input[1].content[0].text, W.sdk)
+  untouched(out.input[2].content[0].text, W.cc)
+  untouched(out.input[2].content[0].text, W.rfc)
+}
+
+// 23. gemini 协议：systemInstruction.parts 中独立计费头 part 被剔除，后续 part 正常混淆
+{
+  const billingLine = W.billing + ": cc_version=2.1.295; cch=ff001;"
+  const sysPart = `Built on ${W.sdk}.`
+  const body = {
+    systemInstruction: {
+      role: "user",
+      parts: [{ text: billingLine }, { text: sysPart }],
+    },
+    contents: [],
+  }
+  const out = onRequest(body, { protocol: "gemini", options: {} })
+  assert(out.systemInstruction.parts.length === 1, "gemini parts：独立计费头 part 被移除")
+  cloaked(sysPart, out.systemInstruction.parts[0].text, W.sdk)
+}
+
+// 24. debug 日志包含 strippedBilling 统计
+{
+  const billingLine = W.billing + ": cc_version=2.1.295; cch=12345;"
+  const sys = `${billingLine}\nYou are ${W.cc}.`
+  let logOutput = ""
+  const originalLog = console.log
+  console.log = (msg) => { logOutput += msg + "\n" }
+  try {
+    onRequest(
+      { model: "antigravity/test-model", system: sys, messages: [] },
+      { options: { debug: true } }
+    )
+  } finally {
+    console.log = originalLog
+  }
+  assert(logOutput.includes("strippedBilling: 1"), "debug: 准确统计剥离了 1 处计费头")
+  assert(logOutput.includes("cloaked: 1 match(es)"), "debug: 剥离计费头后剩余混淆命中 1 次")
 }
 
 console.log(process.exitCode ? "有失败" : "全部通过")

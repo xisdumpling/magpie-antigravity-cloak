@@ -38,10 +38,10 @@ Antigravity 上游**按请求文本里的特定指纹字符串拦截**，并统�
       ^ "x" 之后有一个肉眼不可见的零宽空格
 ```
 
-上游的关键字匹配失效，请求正常通过；人眼看不出差别，模型效果基本不受影响。此思路来自 [cli-proxy-api PR #6280](https://github.com/router-for-me/CLIProxyAPI/pull/6280)，本插件在其基础上：
+上游的关键字匹配失效，请求正常通过；人眼看不出差别，模型效果基本不受影响。此思路来自 [cli-proxy-api PR #6280](https://github.com/router-for-me/CLIProxyAPI/pull/6280) 与 [opencodex](https://github.com/lidge-jun/opencodex)，本插件在其基础上：
 
-- 覆盖实测新发现的计费头触发词
-- 默认覆盖所有系统提示词位置（`system` / `systemInstruction` / `instructions`，以及 chat 协议下 `messages` 里 `role === "system"` 的消息）
+- **首行计费头直接剥离（默认开启）**：自动剥离系统提示词开头的 `x-anthropic-billing-header:` 计费行（独立块整块移除，避免留下空块触发上游校验报错）。既从源头消除 429，又避免其中每轮轮转的 `cch` 参数破坏上游 Prefix Cache（前缀缓存）；非首行引用或关闭剥离时自动由零宽空格混淆兜底
+- **全协议系统提示词覆盖**：默认覆盖所有系统提示词位置（`system` / `systemInstruction` / `system_instruction` / `instructions`，chat 协议 `messages` 里 `role` 为 `"system"` 或 `"developer"` 的消息，以及 responses 协议 `input` 数组里 `role` 为 `"system"` 或 `"developer"` 的消息）
 - 可选 `deep` 模式，把用户消息、工具描述、thinking 块也一起混淆
 
 ## 安装
@@ -72,7 +72,7 @@ magpie plugin add "$(pwd)"
 ## 配置（可选）
 
 ```sh
-magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "off": false, "deep": false, "modelFilter": "antigravity", "debug": false}'
+magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "off": false, "deep": false, "stripBillingHeader": true, "modelFilter": "antigravity", "debug": false}'
 ```
 
 | 选项 | 默认 | 说明 |
@@ -80,8 +80,9 @@ magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "off": false, "
 | `extraWords` | `[]` | 追加自定义敏感词（纯文本，大小写不敏感） |
 | `off` | `false` | 设为 `true` 时完全放行，不混淆 |
 | `deep` | `false` | 设为 `true` 时深度混淆整个请求体（用户消息、tools、thinking 也一起），覆盖面更大但更激进，可能影响模型效果 |
-| `modelFilter` | `"antigravity"` | 目标渠道/模型匹配过滤（支持子串、通配符如 `"antigravity/*"`、正则字符串如 `"/^antigravity/i"`、或字符串数组），未匹配直接原样放行，避免干扰其他 Provider |
-| `debug` | `false` | 设为 `true` 时在控制台输出混淆匹配词、命中次数及耗时日志，方便调试 |
+| `stripBillingHeader` | `true` | 直接剥离系统提示词首行的 `x-anthropic-billing-header:` 计费标记（防 429 且避免 `cch` 轮转导致上游 Prefix Cache 失效）；设为 `false` 时回退为零宽空格混淆 |
+| `modelFilter` | `"antigravity"` | 目标渠道/模型匹配过滤（支持子串、通配符如 `"antigravity/*"` 或 `"*"`、正则字符串如 `"/^antigravity/i"`、或字符串数组），未匹配直接原样放行，避免干扰其他 Provider |
+| `debug` | `false` | 设为 `true` 时在控制台输出计费头剥离数、混淆匹配词、命中次数及耗时日志，方便调试 |
 | `cloakChar` | `"​"` | 自定义混淆字符（默认零宽空格 `U+200B`，可选 `U+200C` ZWNJ 等） |
 
 默认词表：`x-anthropic-billing-header`、`Claude Agent SDK`、`Claude Code`、`Anthropic's official CLI`、`system-conventions`、`system_conventions`、`system-directive`、`system_directive`、`RFC 2119`。
