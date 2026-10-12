@@ -67,23 +67,30 @@ magpie plugin add "$(pwd)"
 
 本地安装的好处：插件文件每秒热加载，改 `antigravity-cloak.middleware.js` 立即生效，方便自定义词表或调试。
 
-> 注意：magpie 不识别插件短名，`options` 等操作都要用完整路径。
-
 ## 配置（可选）
 
+开箱即用，无需手动配置（即使尚未在 GUI 保存过选项，插件也会默认仅针对 `antigravity/*` 渠道生效，其他 Provider 请求自动返回 `undefined` 零拷贝直通）。
+
+如需自定义选项，可在 magpie 的 **「插件 → 已安装」** 页面点击本插件右侧的 **「选项（Options）」** 按钮直接编辑 JSON 保存；或通过命令行设置：
+
 ```sh
-magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "off": false, "deep": false, "stripBillingHeader": true, "modelFilter": "antigravity", "debug": false}'
+# 方式一（GitHub 仓库安装）：直接用包名
+magpie plugin options magpie-antigravity-cloak '{"extraWords": ["自定义词"], "stripBillingHeader": true, "deep": false, "modelFilter": "antigravity", "agentFilter": "", "debug": false}'
+
+# 方式二（本地目录安装）：传入完整目录路径
+magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "stripBillingHeader": true, "deep": false, "modelFilter": "antigravity", "agentFilter": "", "debug": false}'
 ```
 
 | 选项 | 默认 | 说明 |
 |---|---|---|
 | `extraWords` | `[]` | 追加自定义敏感词（纯文本，大小写不敏感） |
-| `off` | `false` | 设为 `true` 时完全放行，不混淆 |
-| `deep` | `false` | 设为 `true` 时深度混淆整个请求体（用户消息、tools、thinking 也一起），覆盖面更大但更激进，可能影响模型效果 |
 | `stripBillingHeader` | `true` | 直接剥离系统提示词首行的 `x-anthropic-billing-header:` 计费标记（防 429 且避免 `cch` 轮转导致上游 Prefix Cache 失效）；设为 `false` 时回退为零宽空格混淆 |
-| `modelFilter` | `"antigravity"` | 目标渠道/模型匹配过滤（支持子串、通配符如 `"antigravity/*"` 或 `"*"`、正则字符串如 `"/^antigravity/i"`、或字符串数组），未匹配直接原样放行，避免干扰其他 Provider |
-| `debug` | `false` | 设为 `true` 时在控制台输出计费头剥离数、混淆匹配词、命中次数及耗时日志，方便调试 |
-| `cloakChar` | `"​"` | 自定义混淆字符（默认零宽空格 `U+200B`，可选 `U+200C` ZWNJ 等） |
+| `deep` | `false` | 设为 `true` 时深度混淆整个请求体（用户消息、tools、thinking 也一起），覆盖面更大但更激进，可能影响模型效果 |
+| `modelFilter` | `"antigravity"` | 目标渠道/模型匹配过滤（兼容 `models` 别名；支持子串、通配符如 `"antigravity/*"` 或 `"*"`、正则字符串如 `"/^antigravity/i"`、或字符串数组）。若使用不带 `antigravity/` 前缀的路由组，可设为 `"*"` 或 `""` |
+| `agentFilter` | `""` | 客户端 Agent 过滤（兼容 `agents` 别名；支持字符串、通配符、正则或数组，如 `["claude-desktop", "claude-code"]`），默认为空不限制 |
+| `off` | `false` | 设为 `true` 时完全放行，不混淆（也可直接在 magpie 插件列表切换插件开关） |
+| `debug` | `false` | 设为 `true` 时在控制台输出协议、客户端、计费头剥离数、混淆匹配词、命中次数及耗时日志，方便调试 |
+| `cloakChar` | `"\u200B"` | 自定义混淆字符（默认零宽空格 `U+200B`，可选 `U+200C` ZWNJ 等） |
 
 默认词表：`x-anthropic-billing-header`、`Claude Agent SDK`、`Claude Code`、`Anthropic's official CLI`、`system-conventions`、`system_conventions`、`system-directive`、`system_directive`、`RFC 2119`。
 
@@ -95,7 +102,7 @@ magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "off": false, "
 npm test
 ```
 
-跑 27 组单测（各协议 system 形态、深度模式、幂等、还原等价、base64 跳过、正则特殊字符、重叠匹配、modelFilter 精准匹配/通配符/放行、Unicode Grapheme 切分安全、cloakChar 自定义混淆字符、debug 统计日志等）。
+跑 33 组单测（各协议 system / developer / responses.input 形态、首行计费头独立块与内联剥离、深度模式、幂等、还原等价、Magpie `undefined` 零拷贝直通、默认渠道隔离、base64 跳过、正则特殊字符、重叠匹配、modelFilter 与 agentFilter 精准匹配/通配符/放行、Unicode Code Point 切分安全、cloakChar 自定义混淆字符、debug 统计日志等）。
 
 端到端验证（用真实 Claude Code 打 magpie，因为手工 curl 复现不出计费头触发词）：
 
@@ -120,10 +127,12 @@ Antigravity 上游（指纹匹配失效，放行）
 
 实现要点：
 
+- **Magpie 零拷贝契约对齐**：未命中过滤规则或请求未发生任何修改时返回 `undefined`，使 Magpie 网关 `moejs` 引擎直接复用原始请求 `[]byte` 字节流（零 JSON 重序列化开销，byte-for-byte 无损直通）
+- **未保存选项时的默认渠道隔离**：针对 Magpie 在用户未保存 Options 前传入 `ctx.options = {}` 的机制，自动对非 `antigravity/*` 命名空间的渠道请求默认放行，杜绝污染其他 Provider
 - **幂等**：已混淆的词中间多了零宽空格，不再匹配，重复处理结果一致
 - **可还原**：去掉零宽空格即还原原文
 - **保守跳过**：`signature` 等字段、超长无空格疑似 base64 的字符串不碰
-- **大小写不敏感**，按词长从长到短匹配，避免短词破坏长词
+- **大小写不敏感**，按词长从长到短单正则线性扫描，避免短词破坏长词
 
 ## 文件结构
 
@@ -155,8 +164,9 @@ magpie-antigravity-cloak/
 
 ## 致谢
 
-- [yetone/magpie](https://github.com/yetone/magpie) — issue [#666](https://github.com/yetone/magpie/issues/666) 的根因分析
-- [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — [PR #6280](https://github.com/router-for-me/CLIProxyAPI/pull/6280) 的零宽空格混淆思路
+- [yetone/magpie](https://github.com/yetone/magpie) — issue [#666](https://github.com/yetone/magpie/issues/666) 的根因分析与网关中间件机制
+- [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — [PR #6280](https://github.com/router-for-me/CLIProxyAPI/pull/6280) 的零宽空格混淆思路与计费块剥离实践
+- [lidge-jun/opencodex](https://github.com/lidge-jun/opencodex) — 首行计费头剥离保 Prefix Cache 的适配思路
 
 ## License
 

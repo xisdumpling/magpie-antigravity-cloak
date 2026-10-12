@@ -1,23 +1,43 @@
 {
   "name": "magpie-antigravity-cloak",
-  "version": "0.3.0",
-  "description": "Antigravity 429 修复中间件：混淆请求里的计费头标记与 Claude Code / Agent SDK 指纹",
+  "version": "0.4.0",
+  "description": "Antigravity 429 修复中间件（Magpie 网关插件）：剥离首行计费头保缓存，混淆系统提示词中的 Claude Code / Agent SDK 指纹",
   "type": "module",
+  "files": [
+    "antigravity-cloak.middleware.js",
+    "README.md",
+    "LICENSE"
+  ],
   "license": "MIT",
   "scripts": {
     "test": "node test.mjs"
   },
-  "keywords": ["magpie", "middleware", "antigravity"],
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "magpie-middleware",
+    "antigravity",
+    "llm-gateway"
+  ],
+  "homepage": "https://github.com/hexiaolv/magpie-antigravity-cloak#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hexiaolv/magpie-antigravity-cloak.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hexiaolv/magpie-antigravity-cloak/issues"
+  },
   "magpie": {
     "middleware": "./antigravity-cloak.middleware.js",
     "options": {
       "extraWords": [],
-      "off": false,
-      "deep": false,
       "stripBillingHeader": true,
+      "deep": false,
       "modelFilter": "antigravity",
+      "agentFilter": "",
+      "off": false,
       "debug": false,
-      "cloakChar": "​"
+      "cloakChar": "\u200B"
     }
   }
 }

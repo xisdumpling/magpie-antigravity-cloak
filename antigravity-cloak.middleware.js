@@ -11,31 +11,38 @@
 //   2. 身份字样："Claude Code" / "Claude Agent SDK" 等
 //      （issue #666 确认，cli-proxy-api PR #6280 的默认指纹）。
 //
-// 做法（参考 cli-proxy-api PR #6280）：
-//   在敏感词第一个字符后插入零宽空格。人眼看不出差别，
-//   模型也基本不受影响，但上游的关键字匹配就失效了。
-//   默认只混淆系统提示词（system / systemInstruction / instructions，
-//   以及 chat 协议下 messages 里 role === "system" 的消息）；
-//   deep 选项会混淆整个请求体（用户消息、tools、thinking 也一起）。
+// 做法（参考 cli-proxy-api PR #6280 与 opencodex）：
+//   1. 默认直接剥离系统提示词开头的 x-anthropic-billing-header 计费行（独立块整块移除），
+//      既从源头消除 429，又避免每轮变化的 cch 参数破坏上游 Prefix Cache（前缀缓存）。
+//   2. 在敏感词第一个字符后插入零宽空格（U+200B）。人眼看不出差别，模型基本不受影响，
+//      但上游的关键字匹配即刻失效。
+//   3. 默认只处理系统提示词（system / systemInstruction / system_instruction / instructions，
+//      以及 chat 协议 messages 与 responses 协议 input 中 role 为 system / developer 的消息）；
+//      deep 选项会深度混淆整个请求体（用户消息、tools、thinking 也一起）。
 //
-// 安装：magpie plugin add /Users/heguanghai/Code/magpie-antigravity-cloak
-//   （短名不识别，options 操作也要用完整路径）
+// 安装：
+//   magpie plugin add https://github.com/hexiaolv/magpie-antigravity-cloak
+//   或本地目录：magpie plugin add /path/to/magpie-antigravity-cloak
 //
-// 可选配置（magpie plugin options <完整路径> '<json>'）：
+// 可选配置（可在 Magpie「插件 → 已安装 → 选项」中编辑，或通过 CLI 设置）：
 //   {
 //     "extraWords": ["自定义敏感词"],
-//     "off": false,
-//     "deep": false,
 //     "stripBillingHeader": true,   // 直接剥离首行 x-anthropic-billing-header（防 429 且避免 cch 轮转破坏 Prefix Cache）
-//     "modelFilter": "antigravity", // 仅对匹配的模型启用（支持字符串、通配符、正则字符串、数组）
+//     "deep": false,                // 深度混淆整个请求体（用户消息、tools、thinking 也一起）
+//     "modelFilter": "antigravity", // 仅对匹配的模型启用（兼容 models 别名；支持子串、通配符、/正则/、数组；设 "" 或 "*" 不过滤）
+//     "agentFilter": "",            // 仅对匹配的客户端 Agent 启用（兼容 agents 别名，如 "claude-desktop"、"claude-code"）
+//     "off": false,                 // 设为 true 时完全放行
 //     "debug": false,               // 输出命中词与耗时日志
-//     "cloakChar": "​"         // 自定义混淆字符（默认零宽空格 U+200B）
+//     "cloakChar": "\u200B"         // 自定义混淆字符（默认零宽空格 U+200B）
 //   }
-//   off 设为 true 时完全放行；deep 设为 true 时深度混淆整个请求体，
-//   覆盖面更大但更激进。
+//
+// Magpie 网关中间件规范对齐：
+//   - 未命中过滤规则或请求未发生任何修改时返回 undefined，使 Magpie 网关直接复用原始 []byte（零序列化开销、byte-for-byte 无损直通）
+//   - 即使未在 GUI 保存过 Options（ctx.options 为 {}），对带 "<provider>/" 前缀的非 antigravity 渠道请求也默认自动放行
 
 // 默认零宽空格（U+200B），写成转义形式避免源码中出现不可见字符
-const DEFAULT_CLOAK_CHAR = "​"
+const DEFAULT_CLOAK_CHAR = "\u200B"
+const DEFAULT_MODEL_FILTER = "antigravity"
 
 // 匹配系统提示词首行的 Claude Code 计费头（x-anthropic-billing-header: ...）
 // 该行携带每轮变化的 cch 参数，直接剥离既可消除 429 触发源，又能防止上游 Prefix Cache 失效
@@ -43,11 +50,11 @@ const BILLING_HEADER_LEADING_RE = /^\s*x-anthropic-billing-header:[^\r\n]*(?:\r?
 
 // 常见零宽/不可见字符集合（用于 buildNeedles 自动过滤，防止用户误贴造成脏匹配）
 const INVISIBLE_CHARS = new Set([
-  "​", // Zero Width Space
-  "‌", // Zero Width Non-Joiner
-  "‍", // Zero Width Joiner
-  "⁠", // Word Joiner
-  "﻿", // Zero Width No-Break Space / BOM
+  "\u200B", // Zero Width Space
+  "\u200C", // Zero Width Non-Joiner
+  "\u200D", // Zero Width Joiner
+  "\u2060", // Word Joiner
+  "\uFEFF", // Zero Width No-Break Space / BOM
 ])
 
 // 默认敏感词，全部纯 ASCII。不要把零宽字符写进词表，会被 buildNeedles 过滤掉。
@@ -125,23 +132,25 @@ function getCompiledRegex(extraWords, cloakChar = DEFAULT_CLOAK_CHAR) {
 }
 
 // 剥离字符串开头的 x-anthropic-billing-header 计费行（锚定开头，O(1) 判定）
-function stripLeadingBillingHeader(text, stats) {
+function stripLeadingBillingHeader(text, state) {
   if (typeof text !== "string" || text.length === 0) return text
   const stripped = text.replace(BILLING_HEADER_LEADING_RE, "")
-  if (stripped !== text && stats) {
-    stats.strippedBilling++
+  if (stripped !== text && state) {
+    state.changed = true
+    state.strippedBilling++
   }
   return stripped
 }
 
 // 在 text 的每个敏感词第一个字符后插混淆字符。
 // 使用单正则整体匹配，已混淆的词中间多了混淆字符，不再匹配，天然幂等。
-function cloakText(text, regex, cloakChar, stats) {
+function cloakText(text, regex, cloakChar, state) {
   if (typeof text !== "string" || text.length < 2 || !regex) return text
   return text.replace(regex, (m) => {
-    if (stats) {
-      stats.count++
-      stats.matches.add(m.toLowerCase())
+    if (state) {
+      state.changed = true
+      state.count++
+      if (state.matches) state.matches.add(m.toLowerCase())
     }
     // Unicode Code Point 安全切分，防止 Emoji 或双字节字符代理对被截断
     const firstChar = String.fromCodePoint(m.codePointAt(0))
@@ -150,24 +159,46 @@ function cloakText(text, regex, cloakChar, stats) {
 }
 
 // 递归遍历 JSON 值：对每个字符串混淆，并原地写回。
-// 疑似 base64 / data URL 的超长无空格串不碰；签名等字段不碰。
-const SKIP_KEYS = new Set(["signature", "id", "session", "sessionId", "requestId"])
+// 疑似 base64 / data URL 的超长无空格串不碰；签名、ID、协议枚举等元数据字段不碰。
+const SKIP_KEYS = new Set([
+  "signature",
+  "thoughtSignature",
+  "thought_signature",
+  "encrypted_content",
+  "id",
+  "call_id",
+  "tool_use_id",
+  "tool_call_id",
+  "session",
+  "sessionId",
+  "requestId",
+  "prompt_cache_key",
+  "previous_response_id",
+  "model",
+  "role",
+  "type",
+  "media_type",
+  "mimeType",
+  "mime_type",
+])
 
-function cloakDeep(value, regex, cloakChar, stats) {
+function cloakDeep(value, regex, cloakChar, state) {
   if (value == null) return value
   const t = typeof value
   if (t === "string") {
     if (value.length > 4096 && !value.includes(" ")) return value
-    return cloakText(value, regex, cloakChar, stats)
+    return cloakText(value, regex, cloakChar, state)
   }
   if (t !== "object") return value
   if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) value[i] = cloakDeep(value[i], regex, cloakChar, stats)
+    for (let i = 0; i < value.length; i++) value[i] = cloakDeep(value[i], regex, cloakChar, state)
     return value
   }
-  for (const k in value) {
+  const keys = Object.keys(value)
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i]
     if (SKIP_KEYS.has(k)) continue
-    value[k] = cloakDeep(value[k], regex, cloakChar, stats)
+    value[k] = cloakDeep(value[k], regex, cloakChar, state)
   }
   return value
 }
@@ -183,20 +214,20 @@ function isSystemRole(msg) {
 }
 
 // 混淆一个可能是字符串、块数组或嵌套对象的系统提示词字段，并按需剥离首行计费头
-function cloakSystemField(sys, regex, cloakChar, stripBilling, stats) {
+function cloakSystemField(sys, regex, cloakChar, stripBilling, state) {
   if (typeof sys === "string") {
-    const cleaned = stripBilling ? stripLeadingBillingHeader(sys, stats) : sys
-    return cloakText(cleaned, regex, cloakChar, stats)
+    const cleaned = stripBilling ? stripLeadingBillingHeader(sys, state) : sys
+    return cloakText(cleaned, regex, cloakChar, state)
   }
   if (Array.isArray(sys)) {
     for (let i = 0; i < sys.length; i++) {
       const item = sys[i]
       if (typeof item === "string") {
-        const cleaned = stripBilling ? stripLeadingBillingHeader(item, stats) : item
-        sys[i] = cloakText(cleaned, regex, cloakChar, stats)
+        const cleaned = stripBilling ? stripLeadingBillingHeader(item, state) : item
+        sys[i] = cloakText(cleaned, regex, cloakChar, state)
       } else if (item && typeof item === "object") {
         if (stripBilling && typeof item.text === "string" && item.text.length > 0) {
-          const stripped = stripLeadingBillingHeader(item.text, stats)
+          const stripped = stripLeadingBillingHeader(item.text, state)
           if (stripped.length === 0) {
             // 整块仅为计费头：直接移除该块，避免留下空 text 块触发上游校验错误
             sys.splice(i, 1)
@@ -205,22 +236,22 @@ function cloakSystemField(sys, regex, cloakChar, stripBilling, stats) {
           }
           item.text = stripped
         }
-        cloakDeep(item, regex, cloakChar, stats)
+        cloakDeep(item, regex, cloakChar, state)
       }
     }
     return sys
   }
   if (sys && typeof sys === "object") {
     if (Array.isArray(sys.parts)) {
-      cloakSystemField(sys.parts, regex, cloakChar, stripBilling, stats)
+      cloakSystemField(sys.parts, regex, cloakChar, stripBilling, state)
       return sys
     }
-    cloakDeep(sys, regex, cloakChar, stats)
+    cloakDeep(sys, regex, cloakChar, state)
   }
   return sys
 }
 
-// 获取或编译 modelFilter 的正则表达式（带缓存）
+// 获取或编译过滤规则的正则表达式（带缓存）
 function getFilterRegex(pattern, flags) {
   const key = `${pattern}\0${flags}`
   if (filterRegexCache.has(key)) return filterRegexCache.get(key)
@@ -233,14 +264,14 @@ function getFilterRegex(pattern, flags) {
   return re
 }
 
-// 匹配模型是否命中过滤规则
-function isModelMatched(model, filter) {
-  if (!filter) return true
-  if (typeof model !== "string") return false
+// 匹配目标字符串（model 或 agent）是否命中过滤规则
+function isTargetMatched(target, filter) {
+  if (!filter || (Array.isArray(filter) && filter.length === 0)) return true
+  if (typeof target !== "string") return false
 
   const checkSingle = (rule) => {
     if (!rule) return false
-    if (rule instanceof RegExp) return rule.test(model)
+    if (rule instanceof RegExp) return rule.test(target)
     if (typeof rule === "string") {
       const trimmedRule = rule.trim()
       if (!trimmedRule) return false
@@ -251,15 +282,15 @@ function isModelMatched(model, filter) {
         const pattern = trimmedRule.slice(1, lastSlash)
         const flags = trimmedRule.slice(lastSlash + 1)
         const re = getFilterRegex(pattern, flags)
-        return re ? re.test(model) : false
+        return re ? re.test(target) : false
       }
       // 支持通配符格式，如 "antigravity/*" 或 "*gemini*"
       if (trimmedRule.includes("*")) {
         const escaped = escapeRegExp(trimmedRule).replace(/\\\*/g, ".*")
         const re = getFilterRegex(`^${escaped}$`, "i")
-        return re ? re.test(model) : false
+        return re ? re.test(target) : false
       }
-      return model.toLowerCase().includes(trimmedRule.toLowerCase())
+      return target.toLowerCase().includes(trimmedRule.toLowerCase())
     }
     return false
   }
@@ -271,35 +302,47 @@ function isModelMatched(model, filter) {
 }
 
 // 处理请求体中所有系统提示词位置（anthropic / gemini / chat / responses）
-function processSystemPrompts(body, regex, cloakChar, stripBilling, stats) {
+function processSystemPrompts(body, regex, cloakChar, stripBilling, state) {
   for (const key of ["system", "systemInstruction", "system_instruction", "instructions"]) {
     if (body[key] != null) {
-      body[key] = cloakSystemField(body[key], regex, cloakChar, stripBilling, stats)
+      body[key] = cloakSystemField(body[key], regex, cloakChar, stripBilling, state)
     }
   }
   if (Array.isArray(body.messages)) {
     for (const msg of body.messages) {
       if (!isSystemRole(msg) || msg.content == null) continue
-      msg.content = cloakSystemField(msg.content, regex, cloakChar, stripBilling, stats)
+      msg.content = cloakSystemField(msg.content, regex, cloakChar, stripBilling, state)
     }
   }
   if (Array.isArray(body.input)) {
     for (const item of body.input) {
       if (!isSystemRole(item) || item.content == null) continue
-      item.content = cloakSystemField(item.content, regex, cloakChar, stripBilling, stats)
+      item.content = cloakSystemField(item.content, regex, cloakChar, stripBilling, state)
     }
   }
 }
 
 export function onRequest(body, ctx) {
-  if (!body || typeof body !== "object") return body
+  if (!body || typeof body !== "object") return undefined
   const opts = ctx?.options ?? {}
-  if (opts.off) return body
+  if (opts.off) return undefined
 
-  // 渠道/模型过滤：未命中则直接放行，避免干扰其他 Provider
+  // 客户端 Agent 过滤（兼容 agentFilter 与 magpie 社区插件习惯的 agents 字段）
+  const agentRule = opts.agentFilter !== undefined ? opts.agentFilter : opts.agents
+  if (agentRule && !isTargetMatched(ctx?.agent || "", agentRule)) {
+    return undefined
+  }
+
+  // 渠道/模型过滤（兼容 modelFilter 与 models 字段）
+  // 注意：Magpie 在用户未保存 Options 前传入的 ctx.options 为 {}；
+  // 此时若请求模型带有 "<provider>/<model>" 命名空间前缀，默认仅匹配 "antigravity" 渠道，避免干扰其他 Provider
   const model = body?.model || ctx?.model || ""
-  if (opts.modelFilter && !isModelMatched(model, opts.modelFilter)) {
-    return body
+  const rawModelRule = opts.modelFilter !== undefined ? opts.modelFilter : opts.models
+  const effectiveModelRule = rawModelRule !== undefined
+    ? rawModelRule
+    : (model.includes("/") ? DEFAULT_MODEL_FILTER : "")
+  if (effectiveModelRule && !isTargetMatched(model, effectiveModelRule)) {
+    return undefined
   }
 
   const cloakChar = typeof opts.cloakChar === "string" && opts.cloakChar.length > 0
@@ -310,27 +353,42 @@ export function onRequest(body, ctx) {
   const stripBilling = opts.stripBillingHeader !== false
 
   const regex = getCompiledRegex(opts.extraWords, cloakChar)
-  if (!regex && !stripBilling) return body
+  if (!regex && !stripBilling) return undefined
 
-  const stats = opts.debug
-    ? { count: 0, strippedBilling: 0, matches: new Set(), startTime: Date.now() }
-    : null
-
-  // 先处理系统提示词（含剥离首行 billing header 与系统提示词混淆）
-  processSystemPrompts(body, regex, cloakChar, stripBilling, stats)
-
-  // deep：全字段深度混淆，用户消息、tools、thinking 也一起（已混淆过的系统词天然幂等不会二次插入）
-  if (opts.deep && regex) {
-    cloakDeep(body, regex, cloakChar, stats)
+  const state = {
+    changed: false,
+    count: 0,
+    strippedBilling: 0,
+    matches: opts.debug ? new Set() : null,
+    startTime: opts.debug ? Date.now() : 0,
   }
 
-  if (stats) {
-    const elapsed = Date.now() - stats.startTime
-    const matchedList = Array.from(stats.matches).join(", ") || "none"
+  // deep：先仅剥离系统提示词首行计费头，再对全字段做单次深度混淆（避免系统提示词被重复扫描两次）
+  if (opts.deep) {
+    if (stripBilling) {
+      processSystemPrompts(body, null, cloakChar, true, state)
+    }
+    if (regex) {
+      cloakDeep(body, regex, cloakChar, state)
+    }
+  } else {
+    // 默认：仅处理系统提示词（剥离首行 billing header + 混淆敏感词，对模型输出质量影响最小）
+    processSystemPrompts(body, regex, cloakChar, stripBilling, state)
+  }
+
+  if (opts.debug) {
+    const elapsed = Date.now() - state.startTime
+    const matchedList = Array.from(state.matches).join(", ") || "none"
+    const meta = [
+      ctx?.protocol ? `protocol: "${ctx.protocol}"` : "",
+      ctx?.agent ? `agent: "${ctx.agent}"` : "",
+      `model: "${model}"`,
+    ].filter(Boolean).join(" | ")
     console.log(
-      `[antigravity-cloak] model: "${model}" | strippedBilling: ${stats.strippedBilling} | cloaked: ${stats.count} match(es) [${matchedList}] (${elapsed}ms)`
+      `[antigravity-cloak] ${meta} | strippedBilling: ${state.strippedBilling} | cloaked: ${state.count} match(es) [${matchedList}] (${elapsed}ms)`
     )
   }
 
-  return body
+  // 遵循 Magpie 网关中间件规范：未发生实际改动时返回 undefined，网关直接复用原始 []byte 字节流
+  return state.changed ? body : undefined
 }

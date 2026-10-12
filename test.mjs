@@ -5,7 +5,7 @@
 // 每个混淆断言都成对检查"混淆前不含 ZW、混淆后含 ZW"。
 import { onRequest } from "./antigravity-cloak.middleware.js"
 
-const ZW = "​"
+const ZW = "\u200B"
 // 纯净词构造：把源码里的词拆开拼接，保证测试文件里永远没有完整触发词
 const W = {
   billing: "x-an" + "thropic-billing-header",
@@ -165,13 +165,14 @@ const untouched = (after, w) =>
   untouched(out.messages[1].content, W.cc)
 }
 
-// 7. off 选项
+// 7. off 选项：返回 undefined（Magpie 零拷贝原样放行），原 body 不变
 {
   const sys = `You are ${W.cc}.`
   const body = { system: sys, messages: [] }
   const out = onRequest(body, { protocol: "anthropic", options: { off: true } })
-  untouched(out.system, W.cc)
-  assert(out.system === sys, "off=true：完全放行")
+  assert(out === undefined, "off=true：返回 undefined 触发 Magpie 零拷贝直通")
+  untouched(body.system, W.cc)
+  assert(body.system === sys, "off=true：完全放行")
 }
 
 // 8. extraWords
@@ -182,21 +183,24 @@ const untouched = (after, w) =>
   cloaked(sys, out.system, "my-secret-marker")
 }
 
-// 9. 还原等价 + 幂等：去零宽后与原文一致，跑两遍结果一致
+// 9. 还原等价 + 幂等：去零宽后与原文一致，跑第二遍无新改动返回 undefined 且内容一致
 {
   const orig = `You are ${W.cc}, ${W.cli}. ${W.billing}: v=1;`
   const once = onRequest({ system: orig, messages: [] }, { protocol: "anthropic", options: {} })
-  const twice = onRequest(structuredClone(once), { protocol: "anthropic", options: {} })
+  const cloned = structuredClone(once)
+  const twice = onRequest(cloned, { protocol: "anthropic", options: {} })
   assert(once.system.replaceAll(ZW, "") === orig, "还原：去零宽空格后与原文一致")
-  assert(twice.system === once.system, "幂等：跑两遍结果一致")
+  assert(twice === undefined, "幂等：第二遍无改动返回 undefined")
+  assert(cloned.system === once.system, "幂等：跑两遍结果一致")
 }
 
-// 10. base64 大块不碰
+// 10. base64 大块不碰，无改动请求返回 undefined
 {
   const b64 = "Q0xhdWRl" + "x".repeat(5000)
   const body = { system: "ok", messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", data: b64 } }] }] }
-  const out = onRequest(body, { protocol: "anthropic", options: {} })
-  assert(out.messages[0].content[0].source.data === b64, "base64 图片数据不动")
+  const out = onRequest(body, { protocol: "anthropic", options: { deep: true } })
+  assert(out === undefined, "干净请求 + base64：无改动返回 undefined")
+  assert(body.messages[0].content[0].source.data === b64, "base64 图片数据不动")
 }
 
 // 11. 词表含正则特殊字符也能安全匹配
@@ -216,7 +220,7 @@ const untouched = (after, w) =>
   assert(count === 2, `重叠匹配不漏（插了 ${count} 处，应为 2）`)
 }
 
-// 13. modelFilter：字符串匹配与未匹配放行
+// 13. modelFilter：字符串匹配与未匹配放行（未匹配返回 undefined）
 {
   const sys = `You are ${W.cc}.`
   // 命中 antigravity
@@ -226,13 +230,12 @@ const untouched = (after, w) =>
   )
   cloaked(sys, hit.system, W.cc)
 
-  // 未命中 antigravity，直接放行
-  const miss = onRequest(
-    { model: "anthropic/claude-3-7-sonnet", system: sys, messages: [] },
-    { options: { modelFilter: "antigravity" } }
-  )
-  untouched(miss.system, W.cc)
-  assert(miss.system === sys, "modelFilter: 未命中时系统提示词保持原文")
+  // 未命中 antigravity，直接返回 undefined 放行
+  const missBody = { model: "anthropic/claude-3-7-sonnet", system: sys, messages: [] }
+  const miss = onRequest(missBody, { options: { modelFilter: "antigravity" } })
+  assert(miss === undefined, "modelFilter: 未命中时返回 undefined")
+  untouched(missBody.system, W.cc)
+  assert(missBody.system === sys, "modelFilter: 未命中时系统提示词保持原文")
 }
 
 // 14. modelFilter：支持正则模式字符串与数组
@@ -245,16 +248,18 @@ const untouched = (after, w) =>
   )
   cloaked(sys, hit.system, W.cc)
 
+  const missBody = { model: "openai/gpt-4o", system: sys, messages: [] }
   const miss = onRequest(
-    { model: "openai/gpt-4o", system: sys, messages: [] },
+    missBody,
     { options: { modelFilter: ["antigravity", "custom-target"] } }
   )
-  untouched(miss.system, W.cc)
+  assert(miss === undefined, "modelFilter 数组: 未命中时返回 undefined")
+  untouched(missBody.system, W.cc)
 }
 
-// 15. cloakChar 自定义混淆字符（如 ZWNJ ‌）
+// 15. cloakChar 自定义混淆字符（如 ZWNJ \u200C）
 {
-  const ZWNJ = "‌"
+  const ZWNJ = "\u200C"
   const sys = `You are ${W.cc}.`
   const out = onRequest(
     { system: sys, messages: [] },
@@ -325,11 +330,13 @@ const untouched = (after, w) =>
   )
   cloaked(sys, hitGlob.system, W.cc)
 
+  const missBody = { model: "openai/gpt-4o", system: sys, messages: [] }
   const missGlob = onRequest(
-    { model: "openai/gpt-4o", system: sys, messages: [] },
+    missBody,
     { options: { modelFilter: "antigravity/*" } }
   )
-  untouched(missGlob.system, W.cc)
+  assert(missGlob === undefined, "modelFilter 通配符: 未命中时返回 undefined")
+  untouched(missBody.system, W.cc)
 }
 
 // 21. chat 协议：role === "developer" 的系统消息在默认模式下也被混淆并剥离首行计费头
@@ -417,6 +424,70 @@ const untouched = (after, w) =>
   }
   assert(logOutput.includes("strippedBilling: 1"), "debug: 准确统计剥离了 1 处计费头")
   assert(logOutput.includes("cloaked: 1 match(es)"), "debug: 剥离计费头后剩余混淆命中 1 次")
+}
+
+// 25. Magpie 未保存选项（ctx.options 为 {}）时的默认渠道保护：非 antigravity 渠道请求自动返回 undefined
+{
+  const sys = `You are ${W.cc}.`
+  // 未设置 options 时，带 <provider>/<model> 的非 antigravity 渠道请求自动跳过
+  const otherProviderBody = { model: "onetop/gpt-5.5", system: sys, messages: [] }
+  const outOther = onRequest(otherProviderBody, { protocol: "anthropic", options: {} })
+  assert(outOther === undefined, "Magpie 默认 options={}: 非 antigravity 渠道请求返回 undefined 零拷贝放行")
+  untouched(otherProviderBody.system, W.cc)
+
+  // 显式设置 modelFilter: "*" 时，跨渠道也按配置生效
+  const allProviderBody = { model: "onetop/gpt-5.5", system: sys, messages: [] }
+  const outAll = onRequest(allProviderBody, { protocol: "anthropic", options: { modelFilter: "*" } })
+  cloaked(sys, outAll.system, W.cc)
+}
+
+// 26. Magpie agentFilter / agents 客户端过滤支持
+{
+  const sys = `You are ${W.cc}.`
+  const hitAgent = onRequest(
+    { model: "antigravity/gemini-3.8-flash", system: sys, messages: [] },
+    { protocol: "anthropic", agent: "claude-desktop", options: { agentFilter: ["claude-desktop", "claude-code"] } }
+  )
+  cloaked(sys, hitAgent.system, W.cc)
+
+  const missAgentBody = { model: "antigravity/gemini-3.8-flash", system: sys, messages: [] }
+  const missAgent = onRequest(
+    missAgentBody,
+    { protocol: "anthropic", agent: "cursor", options: { agents: ["claude-desktop", "claude-code"] } }
+  )
+  assert(missAgent === undefined, "agentFilter/agents: 未命中客户端时返回 undefined")
+  untouched(missAgentBody.system, W.cc)
+}
+
+// 27. deep 模式：系统提示词只扫描一次（不二次重叠插入），且扩展 SKIP_KEYS（thoughtSignature / encrypted_content / tool_use_id）受保护
+{
+  const body = {
+    system: "aaaa",
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_" + W.cc,
+            tool_use_id: "toolu_" + W.cc,
+            thoughtSignature: "sig_" + W.cc,
+            encrypted_content: "enc_" + W.cc,
+            text: `hello ${W.cc}`,
+          },
+        ],
+      },
+    ],
+  }
+  const out = onRequest(body, { protocol: "anthropic", options: { deep: true, extraWords: ["aa"] } })
+  const count = (out.system.match(new RegExp(ZW, "g")) || []).length
+  assert(count === 2, `deep 模式系统提示词单次扫描不重复（插了 ${count} 处，应为 2）`)
+  const part = out.messages[0].content[0]
+  assert(part.id === "toolu_" + W.cc, "deep: id 字段受保护不动")
+  assert(part.tool_use_id === "toolu_" + W.cc, "deep: tool_use_id 字段受保护不动")
+  assert(part.thoughtSignature === "sig_" + W.cc, "deep: thoughtSignature 字段受保护不动")
+  assert(part.encrypted_content === "enc_" + W.cc, "deep: encrypted_content 字段受保护不动")
+  cloaked(`hello ${W.cc}`, part.text, W.cc)
 }
 
 console.log(process.exitCode ? "有失败" : "全部通过")
