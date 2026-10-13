@@ -42,6 +42,7 @@ Antigravity 上游**按请求文本里的特定指纹字符串拦截**，并统�
 
 - **首行计费头直接剥离（默认开启）**：自动剥离系统提示词开头的 `x-anthropic-billing-header:` 计费行（独立块整块移除，避免留下空块触发上游校验报错）。既从源头消除 429，又避免其中每轮轮转的 `cch` 参数破坏上游 Prefix Cache（前缀缓存）；非首行引用或关闭剥离时自动由零宽空格混淆兜底
 - **全协议系统提示词覆盖**：默认覆盖所有系统提示词位置（`system` / `systemInstruction` / `system_instruction` / `instructions`，chat 协议 `messages` 里 `role` 为 `"system"` 或 `"developer"` 的消息，以及 responses 协议 `input` 数组里 `role` 为 `"system"` 或 `"developer"` 的消息）
+- **MCP 工具 Schema 自动修复（默认开启）**：自动为 `tools` 中 `type: "array"` 但缺失 `items` 的参数补全 `items`（以及收敛 Draft-07 元组 `items` 数组），消除第三方 MCP 工具（如 `mitan-mcp`）在 Antigravity 下触发 `400 ... items: missing field` 报错
 - 可选 `deep` 模式，把用户消息、工具描述、thinking 块也一起混淆
 
 ## 安装
@@ -85,6 +86,7 @@ magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "stripBillingHe
 |---|---|---|
 | `extraWords` | `[]` | 追加自定义敏感词（纯文本，大小写不敏感） |
 | `stripBillingHeader` | `true` | 直接剥离系统提示词首行的 `x-anthropic-billing-header:` 计费标记（防 429 且避免 `cch` 轮转导致上游 Prefix Cache 失效）；设为 `false` 时回退为零宽空格混淆 |
+| `fixToolSchema` | `true` | 自动补全工具 Schema 中 `type: "array"` 缺失的 `items` 字段及收敛元组 `items` 数组，避免 Antigravity 返回 `400 ... items: missing field` |
 | `deep` | `false` | 设为 `true` 时深度混淆整个请求体（用户消息、tools、thinking 也一起），覆盖面更大但更激进，可能影响模型效果 |
 | `modelFilter` | `"antigravity"` | 目标渠道/模型匹配过滤（兼容 `models` 别名；支持子串、通配符如 `"antigravity/*"` 或 `"*"`、正则字符串如 `"/^antigravity/i"`、或字符串数组）。若使用不带 `antigravity/` 前缀的路由组，可设为 `"*"` 或 `""` |
 | `agentFilter` | `""` | 客户端 Agent 过滤（兼容 `agents` 别名；支持字符串、通配符、正则或数组，如 `["claude-desktop", "claude-code"]`），默认为空不限制 |

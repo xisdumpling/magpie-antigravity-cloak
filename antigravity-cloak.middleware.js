@@ -16,7 +16,9 @@
 //      既从源头消除 429，又避免每轮变化的 cch 参数破坏上游 Prefix Cache（前缀缓存）。
 //   2. 在敏感词第一个字符后插入零宽空格（U+200B）。人眼看不出差别，模型基本不受影响，
 //      但上游的关键字匹配即刻失效。
-//   3. 默认只处理系统提示词（system / systemInstruction / system_instruction / instructions，
+//   3. 自动补全工具定义（tools）中 type: "array" 缺失的 items 字段及元组 items 数组，
+//      消除 Antigravity 因 MCP 工具 Schema 不完整返回的 400 (items: missing field) 报错。
+//   4. 默认只处理系统提示词（system / systemInstruction / system_instruction / instructions，
 //      以及 chat 协议 messages 与 responses 协议 input 中 role 为 system / developer 的消息）；
 //      deep 选项会深度混淆整个请求体（用户消息、tools、thinking 也一起）。
 //
@@ -28,6 +30,7 @@
 //   {
 //     "extraWords": ["自定义敏感词"],
 //     "stripBillingHeader": true,   // 直接剥离首行 x-anthropic-billing-header（防 429 且避免 cch 轮转破坏 Prefix Cache）
+//     "fixToolSchema": true,        // 自动补全工具 Schema 中 array 缺失的 items 字段（防 400 items: missing field）
 //     "deep": false,                // 深度混淆整个请求体（用户消息、tools、thinking 也一起）
 //     "modelFilter": "antigravity", // 仅对匹配的模型启用（兼容 models 别名；支持子串、通配符、/正则/、数组；设 "" 或 "*" 不过滤）
 //     "agentFilter": "",            // 仅对匹配的客户端 Agent 启用（兼容 agents 别名，如 "claude-desktop"、"claude-code"）
@@ -322,6 +325,133 @@ function processSystemPrompts(body, regex, cloakChar, stripBilling, state) {
   }
 }
 
+function isPlainObject(v) {
+  return Boolean(v) && typeof v === "object" && !Array.isArray(v)
+}
+
+function isArraySchemaType(typeVal) {
+  if (typeVal === "array") return true
+  if (Array.isArray(typeVal)) {
+    for (let i = 0; i < typeVal.length; i++) {
+      if (typeVal[i] === "array") return true
+    }
+  }
+  return false
+}
+
+// 递归修复单个 JSON Schema 节点中会导致 Antigravity 报 400 的定义：
+// 1. type 为 "array" 但缺失 items（如 mitan-mcp 的 candidates / credentials）：自动补全 items（优先取 prefixItems[0]，否则补 {}）
+// 2. items 为数组（Draft-07 元组 Schema）：Antigravity Protobuf 要求 items 为单个 Schema 对象，收敛为首元素或 {}
+function sanitizeSchemaNode(node, state, depth = 0) {
+  if (!isPlainObject(node) || depth > 32) return
+
+  if (isArraySchemaType(node.type)) {
+    if (Array.isArray(node.items)) {
+      node.items = node.items.length > 0 && isPlainObject(node.items[0]) ? node.items[0] : {}
+      state.changed = true
+      state.fixedSchemas++
+    } else if (!isPlainObject(node.items)) {
+      const prefixFirst =
+        Array.isArray(node.prefixItems) && node.prefixItems.length > 0 && isPlainObject(node.prefixItems[0])
+          ? node.prefixItems[0]
+          : null
+      node.items = prefixFirst ? prefixFirst : {}
+      state.changed = true
+      state.fixedSchemas++
+    }
+  } else if (Array.isArray(node.items)) {
+    // 未显式声明 type: "array" 但带了 items 数组时，Magpie plainSchema 也会将其推导为 array
+    node.items = node.items.length > 0 && isPlainObject(node.items[0]) ? node.items[0] : {}
+    state.changed = true
+    state.fixedSchemas++
+  }
+
+  if (isPlainObject(node.items)) {
+    sanitizeSchemaNode(node.items, state, depth + 1)
+  }
+
+  if (isPlainObject(node.properties)) {
+    const keys = Object.keys(node.properties)
+    for (let i = 0; i < keys.length; i++) {
+      sanitizeSchemaNode(node.properties[keys[i]], state, depth + 1)
+    }
+  }
+
+  if (isPlainObject(node.additionalProperties)) {
+    sanitizeSchemaNode(node.additionalProperties, state, depth + 1)
+  }
+
+  const defsBags = ["$defs", "definitions"]
+  for (let b = 0; b < defsBags.length; b++) {
+    const bag = node[defsBags[b]]
+    if (isPlainObject(bag)) {
+      const keys = Object.keys(bag)
+      for (let i = 0; i < keys.length; i++) {
+        sanitizeSchemaNode(bag[keys[i]], state, depth + 1)
+      }
+    }
+  }
+
+  const combinators = ["anyOf", "oneOf", "allOf", "prefixItems"]
+  for (let c = 0; c < combinators.length; c++) {
+    const list = node[combinators[c]]
+    if (Array.isArray(list)) {
+      for (let i = 0; i < list.length; i++) {
+        sanitizeSchemaNode(list[i], state, depth + 1)
+      }
+    }
+  }
+}
+
+function sanitizeToolEntry(tool, state) {
+  if (!isPlainObject(tool)) return
+  if (isPlainObject(tool.input_schema)) {
+    sanitizeSchemaNode(tool.input_schema, state, 0)
+  }
+  if (isPlainObject(tool.parameters)) {
+    sanitizeSchemaNode(tool.parameters, state, 0)
+  }
+  if (isPlainObject(tool.function) && isPlainObject(tool.function.parameters)) {
+    sanitizeSchemaNode(tool.function.parameters, state, 0)
+  }
+  if (Array.isArray(tool.tools)) {
+    sanitizeToolList(tool.tools, state)
+  }
+  const declLists = [tool.functionDeclarations, tool.function_declarations]
+  for (let d = 0; d < declLists.length; d++) {
+    const decls = declLists[d]
+    if (!Array.isArray(decls)) continue
+    for (let i = 0; i < decls.length; i++) {
+      const decl = decls[i]
+      if (!isPlainObject(decl)) continue
+      if (isPlainObject(decl.parameters)) sanitizeSchemaNode(decl.parameters, state, 0)
+      if (isPlainObject(decl.parametersJsonSchema)) sanitizeSchemaNode(decl.parametersJsonSchema, state, 0)
+      if (isPlainObject(decl.parameters_json_schema)) sanitizeSchemaNode(decl.parameters_json_schema, state, 0)
+    }
+  }
+}
+
+function sanitizeToolList(tools, state) {
+  if (!Array.isArray(tools)) return
+  for (let i = 0; i < tools.length; i++) {
+    sanitizeToolEntry(tools[i], state)
+  }
+}
+
+function sanitizeRequestToolSchemas(body, state) {
+  if (Array.isArray(body.tools)) {
+    sanitizeToolList(body.tools, state)
+  }
+  if (Array.isArray(body.input)) {
+    for (let i = 0; i < body.input.length; i++) {
+      const item = body.input[i]
+      if (isPlainObject(item) && Array.isArray(item.tools)) {
+        sanitizeToolList(item.tools, state)
+      }
+    }
+  }
+}
+
 export function onRequest(body, ctx) {
   if (!body || typeof body !== "object") return undefined
   const opts = ctx?.options ?? {}
@@ -351,14 +481,16 @@ export function onRequest(body, ctx) {
 
   // 默认直接剥离首行 x-anthropic-billing-header（可设 stripBillingHeader: false 退回纯零宽混淆）
   const stripBilling = opts.stripBillingHeader !== false
+  const fixSchema = opts.fixToolSchema !== false
 
   const regex = getCompiledRegex(opts.extraWords, cloakChar)
-  if (!regex && !stripBilling) return undefined
+  if (!regex && !stripBilling && !fixSchema) return undefined
 
   const state = {
     changed: false,
     count: 0,
     strippedBilling: 0,
+    fixedSchemas: 0,
     matches: opts.debug ? new Set() : null,
     startTime: opts.debug ? Date.now() : 0,
   }
@@ -376,6 +508,10 @@ export function onRequest(body, ctx) {
     processSystemPrompts(body, regex, cloakChar, stripBilling, state)
   }
 
+  if (fixSchema) {
+    sanitizeRequestToolSchemas(body, state)
+  }
+
   if (opts.debug) {
     const elapsed = Date.now() - state.startTime
     const matchedList = Array.from(state.matches).join(", ") || "none"
@@ -385,7 +521,7 @@ export function onRequest(body, ctx) {
       `model: "${model}"`,
     ].filter(Boolean).join(" | ")
     console.log(
-      `[antigravity-cloak] ${meta} | strippedBilling: ${state.strippedBilling} | cloaked: ${state.count} match(es) [${matchedList}] (${elapsed}ms)`
+      `[antigravity-cloak] ${meta} | strippedBilling: ${state.strippedBilling} | fixedSchemas: ${state.fixedSchemas} | cloaked: ${state.count} match(es) [${matchedList}] (${elapsed}ms)`
     )
   }
 

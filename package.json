@@ -32,6 +32,7 @@
     "options": {
       "extraWords": [],
       "stripBillingHeader": true,
+      "fixToolSchema": true,
       "deep": false,
       "modelFilter": "antigravity",
       "agentFilter": "",

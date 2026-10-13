@@ -490,4 +490,63 @@ const untouched = (after, w) =>
   cloaked(`hello ${W.cc}`, part.text, W.cc)
 }
 
+// 28. fixToolSchema：自动补全 MCP 工具 Schema 中缺失的 array items 及收敛元组 items 数组（防 Antigravity 400 items: missing field）
+{
+  const body = {
+    model: "antigravity/gemini-3.8-flash",
+    system: "clean",
+    tools: [
+      {
+        name: "mcp__mitan-mcp__web_vuln_probe",
+        description: "probe",
+        input_schema: {
+          type: "object",
+          properties: {
+            candidates: { type: "array", description: "missing items" },
+            credentials: { type: ["array", "null"], description: "nullable array missing items" },
+            tuple_arr: { type: "array", items: [{ type: "string" }, { type: "number" }] },
+            prefix_arr: { type: "array", prefixItems: [{ type: "object", properties: { k: { type: "array" } } }] },
+            valid_arr: { type: "array", items: { type: "string" } },
+          },
+        },
+      },
+    ],
+    messages: [{ role: "user", content: "hi" }],
+  }
+  const out = onRequest(body, { protocol: "anthropic", options: {} })
+  assert(out === body, "fixToolSchema: 仅工具 Schema 修复时也标记 changed 并返回 body")
+  const props = out.tools[0].input_schema.properties
+  assert(
+    props.candidates.items && typeof props.candidates.items === "object" && !Array.isArray(props.candidates.items),
+    "fixToolSchema: 缺失 items 的 array 自动补全为对象"
+  )
+  assert(
+    props.credentials.items && typeof props.credentials.items === "object" && !Array.isArray(props.credentials.items),
+    "fixToolSchema: nullable array 缺失 items 自动补全为对象"
+  )
+  assert(
+    !Array.isArray(props.tuple_arr.items) && props.tuple_arr.items.type === "string",
+    "fixToolSchema: 元组 items 数组收敛为首元素 Schema 对象"
+  )
+  assert(
+    props.prefix_arr.items.type === "object" && props.prefix_arr.items.properties.k.items != null,
+    "fixToolSchema: prefixItems 自动提升为 items 且递归补全内层 array"
+  )
+  assert(props.valid_arr.items.type === "string", "fixToolSchema: 已合规的 items 保持不变")
+
+  // 第二次执行应幂等返回 undefined
+  const second = onRequest(body, { protocol: "anthropic", options: {} })
+  assert(second === undefined, "fixToolSchema: 修复后再次执行无改动返回 undefined")
+
+  // 显式关闭 fixToolSchema: false 时不修改
+  const rawBody = {
+    model: "antigravity/gemini-3.8-flash",
+    system: "clean",
+    tools: [{ name: "t", input_schema: { type: "object", properties: { a: { type: "array" } } } }],
+    messages: [],
+  }
+  const offOut = onRequest(rawBody, { protocol: "anthropic", options: { fixToolSchema: false } })
+  assert(offOut === undefined && rawBody.tools[0].input_schema.properties.a.items === undefined, "fixToolSchema=false: 不修改工具 Schema")
+}
+
 console.log(process.exitCode ? "有失败" : "全部通过")
