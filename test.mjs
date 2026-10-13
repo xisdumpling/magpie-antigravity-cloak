@@ -507,6 +507,8 @@ const untouched = (after, w) =>
             tuple_arr: { type: "array", items: [{ type: "string" }, { type: "number" }] },
             prefix_arr: { type: "array", prefixItems: [{ type: "object", properties: { k: { type: "array" } } }] },
             valid_arr: { type: "array", items: { type: "string" } },
+            union_str_first: { type: ["string", "array"], description: "resolves to string in plainSchema" },
+            stray_items_on_obj: { type: "object", properties: { x: { type: "string" } }, items: { type: "string" } },
           },
         },
       },
@@ -533,6 +535,14 @@ const untouched = (after, w) =>
     "fixToolSchema: prefixItems 自动提升为 items 且递归补全内层 array"
   )
   assert(props.valid_arr.items.type === "string", "fixToolSchema: 已合规的 items 保持不变")
+  assert(
+    props.union_str_first.items === undefined,
+    "fixToolSchema: type: ['string', 'array'] 首非空类型为 string 时不误加 items（防 $type == Type.ARRAY 400）"
+  )
+  assert(
+    props.stray_items_on_obj.items === undefined,
+    "fixToolSchema: 非 array 类型残留的孤立 items 被自动剔除"
+  )
 
   // 第二次执行应幂等返回 undefined
   const second = onRequest(body, { protocol: "anthropic", options: {} })

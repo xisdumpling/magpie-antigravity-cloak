@@ -329,23 +329,31 @@ function isPlainObject(v) {
   return Boolean(v) && typeof v === "object" && !Array.isArray(v)
 }
 
-function isArraySchemaType(typeVal) {
-  if (typeVal === "array") return true
+// 解析与 Magpie plainSchema 严格对齐的有效 Schema 类型：
+// Magpie plainSchema 对 type 数组取第一个非 "null" 的类型作为发往 Antigravity 的最终 type
+function resolveEffectiveSchemaType(typeVal) {
+  if (typeof typeVal === "string") return typeVal
   if (Array.isArray(typeVal)) {
     for (let i = 0; i < typeVal.length; i++) {
-      if (typeVal[i] === "array") return true
+      const t = typeVal[i]
+      if (typeof t === "string" && t !== "null" && t !== "") {
+        return t
+      }
     }
   }
-  return false
+  return ""
 }
 
 // 递归修复单个 JSON Schema 节点中会导致 Antigravity 报 400 的定义：
-// 1. type 为 "array" 但缺失 items（如 mitan-mcp 的 candidates / credentials）：自动补全 items（优先取 prefixItems[0]，否则补 {}）
+// 1. 有效 type 为 "array" 但缺失 items（如 mitan-mcp 的 candidates / credentials）：自动补全 items（优先取 prefixItems[0]，否则补 {}）
 // 2. items 为数组（Draft-07 元组 Schema）：Antigravity Protobuf 要求 items 为单个 Schema 对象，收敛为首元素或 {}
+// 3. 有效 type 明确为非 "array"（如 "string"、"object" 或 ["string", "array"]）却残留了 items：删除孤立 items，防止触发 Antigravity "field predicate failed: $type == Type.ARRAY" 400 错误
 function sanitizeSchemaNode(node, state, depth = 0) {
   if (!isPlainObject(node) || depth > 32) return
 
-  if (isArraySchemaType(node.type)) {
+  const effectiveType = resolveEffectiveSchemaType(node.type)
+
+  if (effectiveType === "array") {
     if (Array.isArray(node.items)) {
       node.items = node.items.length > 0 && isPlainObject(node.items[0]) ? node.items[0] : {}
       state.changed = true
@@ -359,9 +367,29 @@ function sanitizeSchemaNode(node, state, depth = 0) {
       state.changed = true
       state.fixedSchemas++
     }
-  } else if (Array.isArray(node.items)) {
-    // 未显式声明 type: "array" 但带了 items 数组时，Magpie plainSchema 也会将其推导为 array
-    node.items = node.items.length > 0 && isPlainObject(node.items[0]) ? node.items[0] : {}
+  } else if (effectiveType === "") {
+    if (isPlainObject(node.properties)) {
+      // 未声明 type 但有 properties 时，Magpie plainSchema 会推导为 type: "object"，此时不能保留 items
+      if (node.items !== undefined) {
+        delete node.items
+        state.changed = true
+        state.fixedSchemas++
+      }
+    } else if (Array.isArray(node.items)) {
+      // 未声明 type 但带了 items 数组时，Magpie plainSchema 会推导为 type: "array"
+      node.items = node.items.length > 0 && isPlainObject(node.items[0]) ? node.items[0] : {}
+      state.changed = true
+      state.fixedSchemas++
+    } else if (node.items === undefined && Array.isArray(node.prefixItems)) {
+      // 未声明 type 且仅带 prefixItems 元组定义时，提升为 array + items
+      node.type = "array"
+      node.items = node.prefixItems.length > 0 && isPlainObject(node.prefixItems[0]) ? node.prefixItems[0] : {}
+      state.changed = true
+      state.fixedSchemas++
+    }
+  } else if (node.items !== undefined) {
+    // 有效类型为非 array（例如 "string"、"object" 或 ["string", "array"]），剔除冲突的 items 字段
+    delete node.items
     state.changed = true
     state.fixedSchemas++
   }
@@ -392,7 +420,7 @@ function sanitizeSchemaNode(node, state, depth = 0) {
     }
   }
 
-  const combinators = ["anyOf", "oneOf", "allOf", "prefixItems"]
+  const combinators = ["anyOf", "oneOf", "allOf"]
   for (let c = 0; c < combinators.length; c++) {
     const list = node[combinators[c]]
     if (Array.isArray(list)) {
