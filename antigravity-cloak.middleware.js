@@ -32,19 +32,23 @@
 //     "stripBillingHeader": true,   // 直接剥离首行 x-anthropic-billing-header（防 429 且避免 cch 轮转破坏 Prefix Cache）
 //     "fixToolSchema": true,        // 自动补全工具 Schema 中 array 缺失的 items 字段（防 400 items: missing field）
 //     "deep": false,                // 深度混淆整个请求体（用户消息、tools、thinking 也一起）
-//     "modelFilter": "antigravity", // 仅对匹配的模型启用（兼容 models 别名；支持子串、通配符、/正则/、数组；设 "" 或 "*" 不过滤）
+//     "accounts": ["antigravity"],  // 目标生效账号（默认仅对 antigravity 渠道生效，其他 Provider 零拷贝放行；设 "*" 不限制）
+//     "modelFilter": "",            // 仅对匹配的模型启用（兼容 models 别名；支持子串、通配符、/正则/、数组；设 "" 或 "*" 不过滤）
 //     "agentFilter": "",            // 仅对匹配的客户端 Agent 启用（兼容 agents 别名，如 "claude-desktop"、"claude-code"）
 //     "off": false,                 // 设为 true 时完全放行
 //     "debug": false,               // 输出命中词与耗时日志
 //     "cloakChar": "\u200B"         // 自定义混淆字符（默认零宽空格 U+200B）
 //   }
 //
-// Magpie 网关中间件规范对齐：
-//   - 未命中过滤规则或请求未发生任何修改时返回 undefined，使 Magpie 网关直接复用原始 []byte（零序列化开销、byte-for-byte 无损直通）
-//   - 即使未在 GUI 保存过 Options（ctx.options 为 {}），对带 "<provider>/" 前缀的非 antigravity 渠道请求也默认自动放行
+// Magpie 网关中间件规范对齐（onProvider 钩子）：
+//   - 使用 onProvider 钩子（Magpie v0.1.1283+）：在请求完成路由、确定发往具体 Provider 时执行
+//   - 天然适配多渠道轮询 / 故障回退（Routing Group）与 Claude Desktop：仅发往 Antigravity 账号的尝试会触发混淆与修复，
+//     回退到 Claude 官方订阅等其他 Provider 时自动返回 undefined 零拷贝无损直通（保持原汁原味，不被混淆污染）
+//   - 未命中过滤规则或请求未发生任何修改时返回 undefined，使 Magpie 网关直接复用原始 []byte（零序列化开销）
 
 // 默认零宽空格（U+200B），写成转义形式避免源码中出现不可见字符
 const DEFAULT_CLOAK_CHAR = "\u200B"
+const DEFAULT_ACCOUNTS = ["antigravity"]
 const DEFAULT_MODEL_FILTER = "antigravity"
 
 // 匹配系统提示词首行的 Claude Code 计费头（x-anthropic-billing-header: ...）
@@ -480,10 +484,27 @@ function sanitizeRequestToolSchemas(body, state) {
   }
 }
 
-export function onRequest(body, ctx) {
+export function onProvider(body, ctx) {
   if (!body || typeof body !== "object") return undefined
   const opts = ctx?.options ?? {}
   if (opts.off) return undefined
+
+  // 账号过滤（onProvider 核心优势）：
+  // Magpie 会在 ctx.provider 中提供目标渠道账号信息，如 { account: "antigravity", model: "..." }。
+  // 默认仅对 antigravity 账号生效；其他 Provider（如 Claude 订阅、API key 等）直接返回 undefined 零拷贝放行
+  const rawAccounts = opts.accounts !== undefined ? opts.accounts : opts.accountFilter
+  const targetAccounts = Array.isArray(rawAccounts)
+    ? rawAccounts
+    : typeof rawAccounts === "string" && rawAccounts.trim()
+    ? [rawAccounts.trim()]
+    : DEFAULT_ACCOUNTS
+
+  if (ctx?.provider) {
+    const provAccount = ctx.provider.account
+    if (!targetAccounts.includes("*") && (!provAccount || !targetAccounts.includes(provAccount))) {
+      return undefined
+    }
+  }
 
   // 客户端 Agent 过滤（兼容 agentFilter 与 magpie 社区插件习惯的 agents 字段）
   const agentRule = opts.agentFilter !== undefined ? opts.agentFilter : opts.agents
@@ -492,13 +513,12 @@ export function onRequest(body, ctx) {
   }
 
   // 渠道/模型过滤（兼容 modelFilter 与 models 字段）
-  // 注意：Magpie 在用户未保存 Options 前传入的 ctx.options 为 {}；
-  // 此时若请求模型带有 "<provider>/<model>" 命名空间前缀，默认仅匹配 "antigravity" 渠道，避免干扰其他 Provider
-  const model = body?.model || ctx?.model || ""
+  const model = ctx?.provider?.model || body?.model || ctx?.model || ""
   const rawModelRule = opts.modelFilter !== undefined ? opts.modelFilter : opts.models
+  // 若未传入 ctx.provider（如离线单测或脱机调用），且未配置 modelFilter 时，默认对带前缀的非 antigravity 模型放行
   const effectiveModelRule = rawModelRule !== undefined
     ? rawModelRule
-    : (model.includes("/") ? DEFAULT_MODEL_FILTER : "")
+    : (!ctx?.provider && model.includes("/") ? DEFAULT_MODEL_FILTER : "")
   if (effectiveModelRule && !isTargetMatched(model, effectiveModelRule)) {
     return undefined
   }
@@ -544,6 +564,7 @@ export function onRequest(body, ctx) {
     const elapsed = Date.now() - state.startTime
     const matchedList = Array.from(state.matches).join(", ") || "none"
     const meta = [
+      ctx?.provider?.account ? `account: "${ctx.provider.account}"` : "",
       ctx?.protocol ? `protocol: "${ctx.protocol}"` : "",
       ctx?.agent ? `agent: "${ctx.agent}"` : "",
       `model: "${model}"`,

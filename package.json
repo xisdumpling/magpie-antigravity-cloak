@@ -1,7 +1,7 @@
 {
   "name": "magpie-antigravity-cloak",
-  "version": "0.4.0",
-  "description": "Antigravity 429 修复中间件（Magpie 网关插件）：剥离首行计费头保缓存，混淆系统提示词中的 Claude Code / Agent SDK 指纹",
+  "version": "0.5.0",
+  "description": "Antigravity 429 修复中间件（Magpie 网关插件）：剥离首行计费头保缓存，混淆系统提示词中的 Claude Code / Agent SDK 指纹，自动修复 MCP 工具 Schema，支持 onProvider 路由级渠道隔离",
   "type": "module",
   "files": [
     "antigravity-cloak.middleware.js",
@@ -34,7 +34,10 @@
       "stripBillingHeader": true,
       "fixToolSchema": true,
       "deep": false,
-      "modelFilter": "antigravity",
+      "accounts": [
+        "antigravity"
+      ],
+      "modelFilter": "",
       "agentFilter": "",
       "off": false,
       "debug": false,

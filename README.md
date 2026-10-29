@@ -70,28 +70,29 @@ magpie plugin add "$(pwd)"
 
 ## 配置（可选）
 
-开箱即用，无需手动配置（即使尚未在 GUI 保存过选项，插件也会默认仅针对 `antigravity/*` 渠道生效，其他 Provider 请求自动返回 `undefined` 零拷贝直通）。
+开箱即用，无需手动配置（基于 Magpie v0.1.1283+ 的 `onProvider` 钩子，默认仅针对发往 `antigravity` 账号的请求生效，其他 Provider 请求自动返回 `undefined` 零拷贝直通）。
 
 如需自定义选项，可在 magpie 的 **「插件 → 已安装」** 页面点击本插件右侧的 **「选项（Options）」** 按钮直接编辑 JSON 保存；或通过命令行设置：
 
 ```sh
 # 方式一（GitHub 仓库安装）：直接用包名
-magpie plugin options magpie-antigravity-cloak '{"extraWords": ["自定义词"], "stripBillingHeader": true, "deep": false, "modelFilter": "antigravity", "agentFilter": "", "debug": false}'
+magpie plugin options magpie-antigravity-cloak '{"accounts": ["antigravity"], "extraWords": ["自定义词"], "stripBillingHeader": true, "fixToolSchema": true, "deep": false, "modelFilter": "", "agentFilter": "", "debug": false}'
 
 # 方式二（本地目录安装）：传入完整目录路径
-magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "stripBillingHeader": true, "deep": false, "modelFilter": "antigravity", "agentFilter": "", "debug": false}'
+magpie plugin options "$(pwd)" '{"accounts": ["antigravity"], "extraWords": ["自定义词"], "stripBillingHeader": true, "fixToolSchema": true, "deep": false, "modelFilter": "", "agentFilter": "", "debug": false}'
 ```
 
 | 选项 | 默认 | 说明 |
 |---|---|---|
+| `accounts` | `["antigravity"]` | 生效的目标渠道账号列表（字符串或数组；默认仅匹配 `antigravity` 账号；可设 `"*"` 对所有账号生效）。天然保障 Routing Group 回退与多渠道共存时非 Antigravity 渠道完全不受污染 |
 | `extraWords` | `[]` | 追加自定义敏感词（纯文本，大小写不敏感） |
 | `stripBillingHeader` | `true` | 直接剥离系统提示词首行的 `x-anthropic-billing-header:` 计费标记（防 429 且避免 `cch` 轮转导致上游 Prefix Cache 失效）；设为 `false` 时回退为零宽空格混淆 |
 | `fixToolSchema` | `true` | 自动补全工具 Schema 中 `type: "array"` 缺失的 `items` 字段及收敛元组 `items` 数组，避免 Antigravity 返回 `400 ... items: missing field` |
 | `deep` | `false` | 设为 `true` 时深度混淆整个请求体（用户消息、tools、thinking 也一起），覆盖面更大但更激进，可能影响模型效果 |
-| `modelFilter` | `"antigravity"` | 目标渠道/模型匹配过滤（兼容 `models` 别名；支持子串、通配符如 `"antigravity/*"` 或 `"*"`、正则字符串如 `"/^antigravity/i"`、或字符串数组）。若使用不带 `antigravity/` 前缀的路由组，可设为 `"*"` 或 `""` |
+| `modelFilter` | `""` | 目标渠道/模型匹配过滤（兼容 `models` 别名；支持子串、通配符如 `"antigravity/*"` 或 `"*"`、正则字符串如 `"/^antigravity/i"`、或字符串数组）。默认为空不额外限制（已有 `accounts` 过滤） |
 | `agentFilter` | `""` | 客户端 Agent 过滤（兼容 `agents` 别名；支持字符串、通配符、正则或数组，如 `["claude-desktop", "claude-code"]`），默认为空不限制 |
 | `off` | `false` | 设为 `true` 时完全放行，不混淆（也可直接在 magpie 插件列表切换插件开关） |
-| `debug` | `false` | 设为 `true` 时在控制台输出协议、客户端、计费头剥离数、混淆匹配词、命中次数及耗时日志，方便调试 |
+| `debug` | `false` | 设为 `true` 时在控制台输出目标账号、协议、客户端、计费头剥离数、混淆匹配词、命中次数及耗时日志，方便调试 |
 | `cloakChar` | `"\u200B"` | 自定义混淆字符（默认零宽空格 `U+200B`，可选 `U+200C` ZWNJ 等） |
 
 默认词表：`x-anthropic-billing-header`、`Claude Agent SDK`、`Claude Code`、`Anthropic's official CLI`、`system-conventions`、`system_conventions`、`system-directive`、`system_directive`、`RFC 2119`。
@@ -104,7 +105,7 @@ magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "stripBillingHe
 npm test
 ```
 
-跑 33 组单测（各协议 system / developer / responses.input 形态、首行计费头独立块与内联剥离、深度模式、幂等、还原等价、Magpie `undefined` 零拷贝直通、默认渠道隔离、base64 跳过、正则特殊字符、重叠匹配、modelFilter 与 agentFilter 精准匹配/通配符/放行、Unicode Code Point 切分安全、cloakChar 自定义混淆字符、debug 统计日志等）。
+跑 37 组单测（涵盖 onProvider 渠道账号精准隔离、Claude 官方订阅及 API Key 零拷贝直通、Routing Group 故障回退请求纯净性保护、各协议 system / developer / responses.input 形态、首行计费头独立块与内联剥离、深度模式、幂等、还原等价、base64 跳过、正则特殊字符、重叠匹配、modelFilter 与 agentFilter 通配符过滤、Unicode Code Point 安全切分、cloakChar 自定义混淆字符、debug 统计日志等）。
 
 端到端验证（用真实 Claude Code 打 magpie，因为手工 curl 复现不出计费头触发词）：
 
@@ -122,15 +123,15 @@ Claude Desktop / Claude Code
         │ 真实请求（system 带计费头与身份字样）
         ▼
 magpie 网关 (localhost:3425)
-        │ onRequest(body, ctx) ← 本中间件：敏感词第一字符后插 U+200B
-        ▼
-Antigravity 上游（指纹匹配失效，放行）
+        │ 路由分发 (Routing)
+        ├── 若尝试 Antigravity 渠道 ──► onProvider(body, ctx) ──► 剥离首行计费头 + 敏感词插 U+200B + 修复 Schema ──► Antigravity 上游 (200 OK)
+        └── 若尝试 Claude 官方或回退 ─► onProvider 返回 undefined ──► 原封不动直通 (零拷贝无损) ──────────────────► Claude 官方上游 (200 OK)
 ```
 
 实现要点：
 
+- **onProvider 路由级精准隔离（Magpie v0.1.1283+）**：通过 Magpie 的 `onProvider` 钩子在每次具体 Provider 尝试（try）时介入，结合 `ctx.provider.account` 精准识别目标。天然支持 Claude Desktop（模型名不带前缀）与多渠道轮询 / 故障回退（Routing Group），仅对发往 Antigravity 的尝试生效，其他 Provider 彻底免受混淆污染
 - **Magpie 零拷贝契约对齐**：未命中过滤规则或请求未发生任何修改时返回 `undefined`，使 Magpie 网关 `moejs` 引擎直接复用原始请求 `[]byte` 字节流（零 JSON 重序列化开销，byte-for-byte 无损直通）
-- **未保存选项时的默认渠道隔离**：针对 Magpie 在用户未保存 Options 前传入 `ctx.options = {}` 的机制，自动对非 `antigravity/*` 命名空间的渠道请求默认放行，杜绝污染其他 Provider
 - **幂等**：已混淆的词中间多了零宽空格，不再匹配，重复处理结果一致
 - **可还原**：去掉零宽空格即还原原文
 - **保守跳过**：`signature` 等字段、超长无空格疑似 base64 的字符串不碰
@@ -140,7 +141,7 @@ Antigravity 上游（指纹匹配失效，放行）
 
 ```
 magpie-antigravity-cloak/
-├── antigravity-cloak.middleware.js   # 中间件主体（onRequest 入口）
+├── antigravity-cloak.middleware.js   # 中间件主体（onProvider 入口）
 ├── test.mjs                          # 本地单测
 ├── package.json                      # magpie 插件清单
 ├── LICENSE
@@ -166,7 +167,8 @@ magpie-antigravity-cloak/
 
 ## 致谢
 
-- [yetone/magpie](https://github.com/yetone/magpie) — issue [#666](https://github.com/yetone/magpie/issues/666) 的根因分析与网关中间件机制
+- [yetone/magpie](https://github.com/yetone/magpie) — issue [#666](https://github.com/yetone/magpie/issues/666) 的根因分析、`onProvider` 网关中间件机制与社区官方版实现
+- [magpie-community/plugins](https://github.com/magpie-community/plugins/tree/main/packages/antigravity-cloak) — 社区官方插件提供的 `onProvider` 路由级隔离范式
 - [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — [PR #6280](https://github.com/router-for-me/CLIProxyAPI/pull/6280) 的零宽空格混淆思路与计费块剥离实践
 - [lidge-jun/opencodex](https://github.com/lidge-jun/opencodex) — 首行计费头剥离保 Prefix Cache 的适配思路
 
